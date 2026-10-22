@@ -1,0 +1,23 @@
+# 备份与临时文件
+*.bak
+*.bak*
+*.bak-*
+*.bak[0-9]*
+__pycache__/
+*.pyc
+
+# 打包产物（exe 走 GitHub Releases，不进仓库）
+dist/
+build/
+download/
+*.spec
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# 本地测试产物
+shots/
+repos.json
