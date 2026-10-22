@@ -12,7 +12,7 @@
 
 ### 方式一：下载 exe（推荐，给不想装 Python 的人）
 
-到 [Releases](../../releases) 下最新的 `山猪WoG助手.exe`，双击即可 —— 会起本地服务并自动打开浏览器。关掉黑窗口 = 停止服务。
+到 [Releases](../../releases) 下最新的 `WoG-Assistant.exe`，双击即可 —— 会起本地服务并自动打开浏览器。关掉黑窗口 = 停止服务。
 
 首次运行 Windows 可能弹「已保护你的电脑」，点**更多信息 → 仍要运行**（exe 是用 PyInstaller 打包的，没有代码签名）。
 
