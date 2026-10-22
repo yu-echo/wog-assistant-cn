@@ -12,9 +12,8 @@
   var LOCAL_PORT = 8791;
   var LOCAL_URL = 'http://127.0.0.1:' + LOCAL_PORT + '/index.html';
 
-  /* 下载地址：换成你的 GitHub Release 或网盘直链即可。
-     留空则使用随页面一起托管的 download/ 目录。 */
-  var DOWNLOAD_URL = 'download/WoG助手.exe';
+  /* 下载地址：GitHub Release 最新版直链，发新版本只要传 asset 就会自动指向新版。 */
+  var DOWNLOAD_URL = 'https://github.com/yu-echo/wog-assistant-cn/releases/latest/download/WoG-Assistant.exe';
 
   var state = { checked: false, running: null, note: '' };
 
