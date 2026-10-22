@@ -952,8 +952,8 @@ function webDisabled(action) {
                 // 允许从仓库（Kho 1/2/3）取材料
                 sWorkshop.setAutoRegisterIncludeStorage('Fusion', true);
                 const isSameLv = cmd.sameLevelOnly !== undefined ? cmd.sameLevelOnly : (cfg && cfg.sameLevelOnly);
-                if (cmd.fuseGear) await runFusionPass(1, 3, 6, isSameLv, 'gear', 10);
-                if (cmd.fuseAcc) await runFusionPass(2, 3, 3, isSameLv, 'acc', 10);
+                if (cmd.fuseGear) await runFusionPass(1, 3, 6, isSameLv, 'gear', 3);
+                if (cmd.fuseAcc) await runFusionPass(2, 3, 3, isSameLv, 'acc', 3);
               } else if (cmd.action === 'fuseLow' && sWorkshop) {
                 // 低阶清理：把凑得齐的低阶装备反复合成成更高一档，用来腾仓库空间。
                 // 默认只处理 R1/R2（合完会变成 R3，再往上合就不是「清理」而是毁装备了）。
@@ -970,10 +970,12 @@ function webDisabled(action) {
                 sWorkshop.setFusionContentType(20);
                 sWorkshop.setAutoRegisterIncludeStorage('Fusion', cmd.includeStorage !== false);
                 const targetTiers = cmd.allowedTiers || (cmd.tier ? [cmd.tier] : [1, 2, 3, 4, 5, 6, 7]);
+                let budget = 8; // 单条命令最多合 8 组，避免一次连发几十个合成请求把游戏压垮
                 for (let t of targetTiers) {
+                  if (budget <= 0) break;
                   sWorkshop.setAutoRegisterRating('Fusion', t);
                   let loopGuard = 0;
-                  while (loopGuard < 20) {
+                  while (loopGuard < 8 && budget > 0) {
                     const regCnt = sWorkshop.autoRegisterFusion();
                     if (!regCnt || !sWorkshop.isFusionStagingFull()) {
                       sWorkshop.clearFusionStaging();
@@ -982,6 +984,7 @@ function webDisabled(action) {
                     const fusionRes = await sWorkshop.reqFusionStagedAsync();
                     if (fusionRes && fusionRes.length > 0) {
                       loopGuard++;
+                      budget--;
                       const rTid = fusionRes[0].tid;
                       const rInfo = nn.db.item.get(rTid);
                       const rLoc = nn.db.locale.get(rInfo?.ItemName);
@@ -1861,7 +1864,7 @@ function webDisabled(action) {
               action: 'fuseLow',
               fromRating: 1,
               toRating: 2,
-              maxRounds: 10,
+              maxRounds: 3,
               sameLevelOnly: true
             }, 'equipment-fusion-t3-auto');
           }
@@ -1913,16 +1916,21 @@ function webDisabled(action) {
 
         // 2. Check if any loose jewels in inventory need auto-deposit to storage
         if (!originalRuntimeHandledAutomation && isAutoDepositJewelActive && invJewels.length > 0 && !window.__pendingJewelCmd) {
-          const availStorage = Math.max(0, (data.jewelsData.storageTotal || 42) - (data.jewelsData.storageUsed || 0));
+          const totalSlots = data.jewelsData.storageTotal || 0;
+          const usedSlots = data.jewelsData.storageUsed || 0;
+          const availStorage = Math.max(0, totalSlots - usedSlots);
           if (availStorage > 0) {
             queueJewelCmd({ action: 'deposit' }, 'jewel-deposit-auto');
+          } else if (totalSlots <= 0 || usedSlots > totalSlots) {
+            // 容量还没读全（仓库页签检测未完成）时不算「满」，直接跳过这一轮，
+            // 否则会拿默认值 42 当分母，误报「仓库已满 45/42」。
           } else {
             // 仓库满了就什么都不做，但必须让用户知道原因 —— 以前这里是完全静默的，
             // 表现就是「自动存放开了却没效果」。限流 60 秒一条，避免每轮刷屏。
             const nowTs = Date.now();
             if (!window.__lastStorageFullLogTs || nowTs - window.__lastStorageFullLogTs > 60000) {
               window.__lastStorageFullLogTs = nowTs;
-              addJewelLog('⚠️ 仓库已满（' + (data.jewelsData.storageUsed || 0) + '/' + (data.jewelsData.storageTotal || 0) +
+              addJewelLog('⚠️ 仓库已满（' + usedSlots + '/' + totalSlots +
                 '），背包里 ' + invJewels.length + ' 颗宝石无法存入。请先清仓库（合成或分解低阶装备）。', 'warning');
             }
           }
@@ -8856,6 +8864,72 @@ function webDisabled(action) {
         return { status: 'blocked', actionId: selectedAction, error: String(error?.message || error) };
       });
     }
+
+    /* ===== 写入节流（防游戏闪退）=====
+     * 病根：自动合成/自动存放以前是「数据没变就每 2 秒重发一次」。
+     * 一条命令没生效（材料凑不齐、物品锁定、仓库满），下一轮就再发一条，
+     * 每条内部还会连跑十几次 reqFusionStagedAsync —— 游戏侧任务越堆越多，最后直接闪退。
+     *
+     * 这里只在唯一入口 executeWrite 上做一层闸：
+     *   1. 自动动作 8 秒起步，数据没变化就翻倍退避（最多 5 分钟一次）
+     *   2. 上一条写命令还在跑、或 3 秒内刚跑完，自动动作直接跳过（不和合成抢）
+     *   3. 手动点击完全不受影响
+     */
+    const AUTO_WRITE_ACTIONS = {
+      'jewel-fusion-auto': 1,
+      'equipment-fusion-t3-auto': 1,
+      'jewel-deposit-auto': 1,
+      'baoyu-deposit': 1,
+      'baoyu-equipment-fusion': 1,
+      'baoyu-organize': 1,
+      'daily-ops': 1
+    };
+    const WRITE_BASE_GAP = 8000;
+    const WRITE_MAX_GAP = 300000;
+    const writeGate = { inflight: false, lastEndTs: 0, startedTs: 0, keys: {} };
+
+    function writeSignature() {
+      try {
+        const d = window.liveJewelData || {};
+        const js = d.jewels || [];
+        return [js.length, d.storageUsed | 0, d.t3GearCount | 0, d.t3AccCount | 0].join('/');
+      } catch (e) { return ''; }
+    }
+
+    function installWriteGate() {
+      const b = window.WOG_COMPANION_RUNTIME_BRIDGE;
+      if (!b || typeof b.executeWrite !== 'function' || b.__wogWriteGate) return false;
+      const orig = b.executeWrite.bind(b);
+      b.executeWrite = function (actionId, cmd) {
+        const key = String(actionId || '');
+        if (!AUTO_WRITE_ACTIONS[key]) return orig(actionId, cmd); // 手动动作直接放行
+        const now = Date.now();
+        const st = writeGate.keys[key] || (writeGate.keys[key] = { attempts: 0, lastSent: 0, sig: '' });
+        // 兜底：某条命令的 promise 一直没回来时放行，免得自动写入被永久卡死
+        if (writeGate.inflight && now - writeGate.startedTs > 60000) writeGate.inflight = false;
+        if (writeGate.inflight || (now - writeGate.lastEndTs) < 3000) {
+          return Promise.resolve({ status: 'skipped-busy', actionId: key });
+        }
+        if (st.lastSent) {
+          if (writeSignature() !== st.sig) st.attempts = 0; // 上次确实生效了，退避清零
+          const gap = Math.min(WRITE_BASE_GAP * Math.pow(2, Math.max(0, st.attempts - 1)), WRITE_MAX_GAP);
+          if (now - st.lastSent < gap) return Promise.resolve({ status: 'skipped-cool', actionId: key });
+        }
+        st.attempts += 1;
+        st.lastSent = now;
+        st.sig = writeSignature();
+        writeGate.inflight = true;
+        writeGate.startedTs = now;
+        const done = function () { writeGate.inflight = false; writeGate.lastEndTs = Date.now(); };
+        let p;
+        try { p = orig(actionId, cmd); } catch (e) { p = Promise.reject(e); }
+        return Promise.resolve(p).then(function (r) { done(); return r; }, function (e) { done(); throw e; });
+      };
+      b.__wogWriteGate = true;
+      return true;
+    }
+    [0, 800, 2500, 6000, 12000].forEach(function (ms) { setTimeout(installWriteGate, ms); });
+    setInterval(installWriteGate, 15000);
 
     let autoFuseAllowedTiers = [1];
     try {
