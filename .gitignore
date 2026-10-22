@@ -21,3 +21,6 @@ desktop.ini
 # 本地测试产物
 shots/
 repos.json
+
+# 对外托管的干净副本（由 publish_web.py 生成）
+_web/
